@@ -11,8 +11,10 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Base64
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -232,7 +234,7 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // Mở trang web đã chọn với bộ chặn quảng cáo & khóa nhảy trang
+    // Mở trang web đã chọn với bộ chặn quảng cáo & hỗ trợ tải cả link blob:
     @SuppressLint("SetJavaScriptEnabled")
     private fun openDouyinWebView(siteTitle: String, siteUrl: String) {
         val allowedHost = URL(siteUrl).host.removePrefix("www.")
@@ -261,24 +263,41 @@ class MainActivity : AppCompatActivity() {
             }
             .create()
 
+        // Cầu nối nhận dữ liệu video dạng Base64 khi web tải qua giao thức blob:
+        webView.addJavascriptInterface(object {
+            @JavascriptInterface
+            fun onBlobReady(base64Data: String) {
+                runOnUiThread {
+                    webView.destroy()
+                    dialog.dismiss()
+                    saveBase64VideoToGallery(base64Data, "douyin_${System.currentTimeMillis()}.mp4")
+                }
+            }
+
+            @JavascriptInterface
+            fun onBlobError(errorMsg: String) {
+                runOnUiThread {
+                    tvStatus.text = "Lỗi đọc dữ liệu blob: $errorMsg"
+                }
+            }
+        }, "AndroidBlob")
+
         webView.webViewClient = object : WebViewClient() {
-            // Khóa không cho nhảy sang trang quảng cáo hoặc mở app ngoài
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val targetUrl = request?.url?.toString() ?: return true
+                if (targetUrl.startsWith("blob:")) return false
                 if (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://")) {
-                    return true // Chặn intent://, shopee://, market://
+                    return true
                 }
                 val host = request.url?.host?.lowercase() ?: return true
                 if (isAdUrl(host)) return true
 
-                // Chỉ cho phép đi tiếp nếu cùng tên miền gốc hoặc là link tải video/CDN
                 if (host.contains(allowedHost) || isLikelyDownloadUrl(targetUrl)) {
                     return false
                 }
-                return true // Chặn toàn bộ các trang nhảy quảng cáo khác
+                return true
             }
 
-            // Chặn tải script/banner từ các mạng quảng cáo phổ biến
             override fun shouldInterceptRequest(
                 view: WebView?,
                 request: WebResourceRequest?
@@ -292,14 +311,70 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.setDownloadListener { downloadUrl, userAgent, _, _, _ ->
-            val cookies = cookieManager.getCookie(downloadUrl)
-            webView.destroy()
-            dialog.dismiss()
-            startDirectGalleryDownload(downloadUrl, userAgent, cookies, "douyin_${System.currentTimeMillis()}.mp4")
+            if (downloadUrl.startsWith("blob:")) {
+                // Giữ WebView mở tạm 1-2 giây để JS đọc dữ liệu từ blob:
+                tvStatus.text = "Đang trích xuất video Douyin..."
+                val js = """
+                    (function() {
+                        fetch('$downloadUrl')
+                            .then(res => res.blob())
+                            .then(blob => {
+                                var reader = new FileReader();
+                                reader.onloadend = function() {
+                                    AndroidBlob.onBlobReady(reader.result);
+                                };
+                                reader.readAsDataURL(blob);
+                            })
+                            .catch(err => AndroidBlob.onBlobError(err.toString()));
+                    })();
+                """.trimIndent()
+                webView.evaluateJavascript(js, null)
+            } else {
+                val cookies = cookieManager.getCookie(downloadUrl)
+                webView.destroy()
+                dialog.dismiss()
+                startDirectGalleryDownload(downloadUrl, userAgent, cookies, "douyin_${System.currentTimeMillis()}.mp4")
+            }
         }
 
         dialog.show()
         webView.loadUrl(siteUrl)
+    }
+
+    private fun saveBase64VideoToGallery(base64Data: String, fileName: String) {
+        tvStatus.text = "Đang lưu video Douyin vào Thư viện..."
+        progressBar.progress = 50
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val pureBase64 = base64Data.substringAfter(",")
+                val videoBytes = Base64.decode(pureBase64, Base64.DEFAULT)
+
+                val tempDir = File(cacheDir, "dl_temp").apply {
+                    if (exists()) deleteRecursively()
+                    mkdirs()
+                }
+                val destFile = File(tempDir, fileName)
+                destFile.writeBytes(videoBytes)
+
+                if (destFile.exists() && destFile.length() > 0) {
+                    saveVideoToGallery(destFile)
+                    destFile.delete()
+                    withContext(Dispatchers.Main) {
+                        progressBar.progress = 100
+                        tvStatus.text = "Tải xong Douyin! Đã lưu vào Thư viện (Movies/VideoDownloader)."
+                    }
+                } else {
+                    withContext(Dispatchers.Main) {
+                        tvStatus.text = "Lỗi: File video bị rỗng."
+                    }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    tvStatus.text = "Lỗi lưu file Douyin: ${e.message}"
+                }
+            }
+        }
     }
 
     private fun isAdUrl(host: String): Boolean {
