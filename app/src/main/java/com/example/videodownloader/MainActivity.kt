@@ -13,6 +13,8 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -30,6 +32,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -45,6 +48,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var progressBar: ProgressBar
 
     private val desktopUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+
+    private val adDomains = listOf(
+        "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+        "adservice.google", "popads.net", "propellerads.com", "adsterra.com",
+        "monetag.com", "highperformanceformat.com", "profitablegate",
+        "taboola.com", "outbrain.com", "mgid.com", "exoclick.com",
+        "onclickalgo", "acscdn.com", "alwingulla", "shopee", "lazada"
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -110,7 +121,6 @@ class MainActivity : AppCompatActivity() {
             val url = extractUrl(etUrl.text.toString())
             if (url.isEmpty()) return@setOnClickListener
 
-            // Luồng 1: Douyin -> Hiện bảng chọn trang web tải
             if (isDouyin(url)) {
                 showDouyinSitePicker(url)
                 return@setOnClickListener
@@ -119,7 +129,6 @@ class MainActivity : AppCompatActivity() {
             tvStatus.text = "Đang bắt đầu tải..."
             progressBar.progress = 0
 
-            // Luồng 2 & 3: TikTok (API tikwm) & YouTube/Facebook (yt-dlp)
             lifecycleScope.launch(Dispatchers.IO) {
                 try {
                     val tempDir = File(cacheDir, "dl_temp").apply {
@@ -196,7 +205,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Hiện danh sách các trang web tải Douyin để người dùng chọn
     private fun showDouyinSitePicker(cleanUrl: String) {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Douyin URL", cleanUrl))
@@ -206,15 +214,13 @@ class MainActivity : AppCompatActivity() {
             "SnapDouyin (snapdouyin.app)",
             "DLPanda (dlpanda.com)",
             "LoveTik (lovetik.com)",
-            "SaveTT (savett.cc)",
-            "Tainhanh (tainhanhvideo.com)"
+            "SaveTT (savett.cc)"
         )
         val siteUrls = arrayOf(
             "https://snapdouyin.app/vi",
             "https://dlpanda.com/vi",
             "https://lovetik.com/vi",
-            "https://savett.cc/en/",
-            "https://tainhanhvideo.com"
+            "https://savett.cc/en/"
         )
 
         AlertDialog.Builder(this)
@@ -226,9 +232,11 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // Mở trang web đã chọn ngay trong App và tự bắt file tải về Thư viện
+    // Mở trang web đã chọn với bộ chặn quảng cáo & khóa nhảy trang
     @SuppressLint("SetJavaScriptEnabled")
     private fun openDouyinWebView(siteTitle: String, siteUrl: String) {
+        val allowedHost = URL(siteUrl).host.removePrefix("www.")
+
         val webView = WebView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -236,6 +244,8 @@ class MainActivity : AppCompatActivity() {
             )
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            settings.javaScriptCanOpenWindowsAutomatically = false
+            settings.setSupportMultipleWindows(false)
         }
 
         val cookieManager = CookieManager.getInstance()
@@ -243,7 +253,7 @@ class MainActivity : AppCompatActivity() {
         cookieManager.setAcceptThirdPartyCookies(webView, true)
 
         val dialog = AlertDialog.Builder(this)
-            .setTitle("$siteTitle (Bấm Dán -> Tải)")
+            .setTitle("$siteTitle (Đã bật chặn QC)")
             .setView(webView)
             .setNegativeButton("Đóng") { d, _ ->
                 webView.destroy()
@@ -251,7 +261,35 @@ class MainActivity : AppCompatActivity() {
             }
             .create()
 
-        webView.webViewClient = WebViewClient()
+        webView.webViewClient = object : WebViewClient() {
+            // Khóa không cho nhảy sang trang quảng cáo hoặc mở app ngoài
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val targetUrl = request?.url?.toString() ?: return true
+                if (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://")) {
+                    return true // Chặn intent://, shopee://, market://
+                }
+                val host = request.url?.host?.lowercase() ?: return true
+                if (isAdUrl(host)) return true
+
+                // Chỉ cho phép đi tiếp nếu cùng tên miền gốc hoặc là link tải video/CDN
+                if (host.contains(allowedHost) || isLikelyDownloadUrl(targetUrl)) {
+                    return false
+                }
+                return true // Chặn toàn bộ các trang nhảy quảng cáo khác
+            }
+
+            // Chặn tải script/banner từ các mạng quảng cáo phổ biến
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): WebResourceResponse? {
+                val host = request?.url?.host?.lowercase() ?: ""
+                if (isAdUrl(host)) {
+                    return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+                }
+                return super.shouldInterceptRequest(view, request)
+            }
+        }
 
         webView.setDownloadListener { downloadUrl, userAgent, _, _, _ ->
             val cookies = cookieManager.getCookie(downloadUrl)
@@ -262,6 +300,22 @@ class MainActivity : AppCompatActivity() {
 
         dialog.show()
         webView.loadUrl(siteUrl)
+    }
+
+    private fun isAdUrl(host: String): Boolean {
+        return adDomains.any { host.contains(it) }
+    }
+
+    private fun isLikelyDownloadUrl(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains(".mp4") ||
+                lower.contains("mime_type=video") ||
+                lower.contains("download") ||
+                lower.contains("cdn") ||
+                lower.contains("douyinvod") ||
+                lower.contains("snssdk") ||
+                lower.contains("byte") ||
+                lower.contains("token=")
     }
 
     private fun startDirectGalleryDownload(fileUrl: String, ua: String, cookies: String?, fileName: String) {
