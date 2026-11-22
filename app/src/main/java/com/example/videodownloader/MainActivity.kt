@@ -57,7 +57,7 @@ class MainActivity : AppCompatActivity() {
 
         // Nút 1: Lấy tiêu đề và link tải trực tiếp
         btnGetInfo.setOnClickListener {
-            val url = etUrl.text.toString().trim()
+            val url = extractUrl(etUrl.text.toString())
             if (url.isEmpty()) return@setOnClickListener
 
             tvStatus.text = "Đang phân tích link..."
@@ -82,7 +82,7 @@ class MainActivity : AppCompatActivity() {
 
         // Nút 2: Tải video lưu thẳng vào Thư viện ảnh
         btnDownload.setOnClickListener {
-            val url = etUrl.text.toString().trim()
+            val url = extractUrl(etUrl.text.toString())
             if (url.isEmpty()) return@setOnClickListener
 
             tvStatus.text = "Đang bắt đầu tải..."
@@ -148,6 +148,12 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    // Tự động tách lấy link https://... khi dán văn bản có chữ thừa từ Douyin/TikTok
+    private fun extractUrl(input: String): String {
+        val regex = Regex("https?://[^\\s]+")
+        return regex.find(input)?.value ?: input.trim()
     }
 
     private fun saveVideoToGallery(videoFile: File) {
