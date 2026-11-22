@@ -56,7 +56,8 @@ class MainActivity : AppCompatActivity() {
         "adservice.google", "popads.net", "propellerads.com", "adsterra.com",
         "monetag.com", "highperformanceformat.com", "profitablegate",
         "taboola.com", "outbrain.com", "mgid.com", "exoclick.com",
-        "onclickalgo", "acscdn.com", "alwingulla", "shopee", "lazada"
+        "onclickalgo", "acscdn.com", "alwingulla", "shopee", "lazada",
+        "adnxs.com", "criteo.com", "pubmatic.com", "rubiconproject.com"
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -92,6 +93,10 @@ class MainActivity : AppCompatActivity() {
                 showDouyinSitePicker(url)
                 return@setOnClickListener
             }
+            if (isWeibo(url)) {
+                showWeiboSitePicker(url)
+                return@setOnClickListener
+            }
 
             tvStatus.text = "Đang phân tích link..."
             tvDirectLink.text = ""
@@ -125,6 +130,10 @@ class MainActivity : AppCompatActivity() {
 
             if (isDouyin(url)) {
                 showDouyinSitePicker(url)
+                return@setOnClickListener
+            }
+            if (isWeibo(url)) {
+                showWeiboSitePicker(url)
                 return@setOnClickListener
             }
 
@@ -207,10 +216,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showDouyinSitePicker(cleanUrl: String) {
+    private fun copyToClipboard(label: String, text: String) {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Douyin URL", cleanUrl))
-        Toast.makeText(this, "Đã copy sẵn link Douyin!", Toast.LENGTH_SHORT).show()
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+        Toast.makeText(this, "Đã copy sẵn link $label!", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showDouyinSitePicker(cleanUrl: String) {
+        copyToClipboard("Douyin", cleanUrl)
 
         val siteNames = arrayOf(
             "SnapDouyin (snapdouyin.app)",
@@ -228,15 +241,40 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Chọn trang tải Douyin")
             .setItems(siteNames) { _, which ->
-                openDouyinWebView(siteNames[which], siteUrls[which])
+                openWebDownloader(siteNames[which], siteUrls[which], "douyin")
             }
             .setNegativeButton("Hủy", null)
             .show()
     }
 
-    // Mở trang web đã chọn với bộ chặn quảng cáo & hỗ trợ tải cả link blob:
+    private fun showWeiboSitePicker(cleanUrl: String) {
+        copyToClipboard("Weibo", cleanUrl)
+
+        val siteNames = arrayOf(
+            "SnapAny (snapany.com)",
+            "WeiboVideo (weibovideo.com)",
+            "DLPanda (dlpanda.com)",
+            "GreenVideo (greenvideo.cc)"
+        )
+        val siteUrls = arrayOf(
+            "https://snapany.com/vi/weibo",
+            "https://weibovideo.com/",
+            "https://dlpanda.com/vi",
+            "https://greenvideo.cc/weibo"
+        )
+
+        AlertDialog.Builder(this)
+            .setTitle("Chọn trang tải Weibo")
+            .setItems(siteNames) { _, which ->
+                openWebDownloader(siteNames[which], siteUrls[which], "weibo")
+            }
+            .setNegativeButton("Hủy", null)
+            .show()
+    }
+
+    // Mở trang web đã chọn với bộ chặn quảng cáo, khóa nhảy trang & hỗ trợ tải link blob:
     @SuppressLint("SetJavaScriptEnabled")
-    private fun openDouyinWebView(siteTitle: String, siteUrl: String) {
+    private fun openWebDownloader(siteTitle: String, siteUrl: String, filePrefix: String) {
         val allowedHost = URL(siteUrl).host.removePrefix("www.")
 
         val webView = WebView(this).apply {
@@ -270,7 +308,7 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     webView.destroy()
                     dialog.dismiss()
-                    saveBase64VideoToGallery(base64Data, "douyin_${System.currentTimeMillis()}.mp4")
+                    saveBase64VideoToGallery(base64Data, "${filePrefix}_${System.currentTimeMillis()}.mp4")
                 }
             }
 
@@ -312,8 +350,7 @@ class MainActivity : AppCompatActivity() {
 
         webView.setDownloadListener { downloadUrl, userAgent, _, _, _ ->
             if (downloadUrl.startsWith("blob:")) {
-                // Giữ WebView mở tạm 1-2 giây để JS đọc dữ liệu từ blob:
-                tvStatus.text = "Đang trích xuất video Douyin..."
+                tvStatus.text = "Đang trích xuất video..."
                 val js = """
                     (function() {
                         fetch('$downloadUrl')
@@ -333,7 +370,7 @@ class MainActivity : AppCompatActivity() {
                 val cookies = cookieManager.getCookie(downloadUrl)
                 webView.destroy()
                 dialog.dismiss()
-                startDirectGalleryDownload(downloadUrl, userAgent, cookies, "douyin_${System.currentTimeMillis()}.mp4")
+                startDirectGalleryDownload(downloadUrl, userAgent, cookies, "${filePrefix}_${System.currentTimeMillis()}.mp4")
             }
         }
 
@@ -342,7 +379,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveBase64VideoToGallery(base64Data: String, fileName: String) {
-        tvStatus.text = "Đang lưu video Douyin vào Thư viện..."
+        tvStatus.text = "Đang lưu video vào Thư viện..."
         progressBar.progress = 50
 
         lifecycleScope.launch(Dispatchers.IO) {
@@ -362,7 +399,7 @@ class MainActivity : AppCompatActivity() {
                     destFile.delete()
                     withContext(Dispatchers.Main) {
                         progressBar.progress = 100
-                        tvStatus.text = "Tải xong Douyin! Đã lưu vào Thư viện (Movies/VideoDownloader)."
+                        tvStatus.text = "Tải xong! Đã lưu vào Thư viện (Movies/VideoDownloader)."
                     }
                 } else {
                     withContext(Dispatchers.Main) {
@@ -371,7 +408,7 @@ class MainActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    tvStatus.text = "Lỗi lưu file Douyin: ${e.message}"
+                    tvStatus.text = "Lỗi lưu file: ${e.message}"
                 }
             }
         }
@@ -389,12 +426,14 @@ class MainActivity : AppCompatActivity() {
                 lower.contains("cdn") ||
                 lower.contains("douyinvod") ||
                 lower.contains("snssdk") ||
+                lower.contains("weibocdn") ||
+                lower.contains("sinaimg") ||
                 lower.contains("byte") ||
                 lower.contains("token=")
     }
 
     private fun startDirectGalleryDownload(fileUrl: String, ua: String, cookies: String?, fileName: String) {
-        tvStatus.text = "Đang tải video Douyin về Thư viện..."
+        tvStatus.text = "Đang tải video về Thư viện..."
         progressBar.progress = 0
 
         lifecycleScope.launch(Dispatchers.IO) {
@@ -407,7 +446,7 @@ class MainActivity : AppCompatActivity() {
                 downloadDirectFile(fileUrl, destFile, ua, cookies) { p ->
                     runOnUiThread {
                         progressBar.progress = p
-                        tvStatus.text = "Đang tải Douyin: $p%"
+                        tvStatus.text = "Đang tải: $p%"
                     }
                 }
                 if (destFile.exists() && destFile.length() > 0) {
@@ -415,7 +454,7 @@ class MainActivity : AppCompatActivity() {
                     destFile.delete()
                     withContext(Dispatchers.Main) {
                         progressBar.progress = 100
-                        tvStatus.text = "Tải xong Douyin! Đã lưu vào Thư viện (Movies/VideoDownloader)."
+                        tvStatus.text = "Tải xong! Đã lưu vào Thư viện (Movies/VideoDownloader)."
                     }
                 } else {
                     withContext(Dispatchers.Main) {
@@ -424,7 +463,7 @@ class MainActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    tvStatus.text = "Lỗi tải file Douyin: ${e.message}"
+                    tvStatus.text = "Lỗi tải file: ${e.message}"
                 }
             }
         }
@@ -432,6 +471,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun isTikTok(url: String) = url.lowercase().contains("tiktok.com")
     private fun isDouyin(url: String) = url.lowercase().contains("douyin.com")
+    private fun isWeibo(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("weibo.com") || lower.contains("weibo.cn")
+    }
 
     private fun fetchTikWmApi(videoUrl: String): Pair<String, String> {
         val encodedUrl = URLEncoder.encode(videoUrl, "UTF-8")
