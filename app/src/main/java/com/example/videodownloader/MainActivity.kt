@@ -141,4 +141,40 @@ class MainActivity : AppCompatActivity() {
                     withContext(Dispatchers.Main) {
                         tvStatus.text = "Cập nhật hoàn tất: $status"
                     }
-                } catch (
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        tvStatus.text = "Lỗi cập nhật: ${e.message}"
+                    }
+                }
+            }
+        }
+    }
+
+    private fun saveVideoToGallery(videoFile: File) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, videoFile.name)
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/VideoDownloader")
+                put(MediaStore.Video.Media.IS_PENDING, 1)
+            }
+            val resolver = contentResolver
+            val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            if (uri != null) {
+                resolver.openOutputStream(uri)?.use { outStream ->
+                    FileInputStream(videoFile).use { inStream ->
+                        inStream.copyTo(outStream)
+                    }
+                }
+                values.clear()
+                values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            }
+        } else {
+            val moviesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
+            val destFile = File(moviesDir, videoFile.name)
+            videoFile.copyTo(destFile, overwrite = true)
+            MediaScannerConnection.scanFile(this, arrayOf(destFile.absolutePath), arrayOf("video/mp4"), null)
+        }
+    }
+}
