@@ -1,7 +1,11 @@
 package com.example.videodownloader
 
+import android.content.ContentValues
+import android.media.MediaScannerConnection
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.MediaStore
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ProgressBar
@@ -15,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
 
 class MainActivity : AppCompatActivity() {
 
@@ -36,7 +41,6 @@ class MainActivity : AppCompatActivity() {
         val btnDownload = findViewById<Button>(R.id.btnDownload)
         val btnUpdate = findViewById<Button>(R.id.btnUpdate)
 
-        // Khởi tạo yt-dlp và FFmpeg ngầm khi mở app
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 YoutubeDL.getInstance().init(this@MainActivity)
@@ -48,7 +52,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Nút 1: Lấy tiêu đề và link tải trực tiếp
         btnGetInfo.setOnClickListener {
             val url = etUrl.text.toString().trim()
             if (url.isEmpty()) return@setOnClickListener
@@ -71,7 +74,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Nút 2: Tải video lưu thẳng vào thư mục Downloads
         btnDownload.setOnClickListener {
             val url = etUrl.text.toString().trim()
             if (url.isEmpty()) return@setOnClickListener
@@ -81,12 +83,16 @@ class MainActivity : AppCompatActivity() {
 
             lifecycleScope.launch(Dispatchers.IO) {
                 try {
-                    val downloadDir = Environment.getExternalStoragePublicDirectory(
-                        Environment.DIRECTORY_DOWNLOADS
-                    )
+                    // 1. Tạo thư mục tạm riêng của app (luôn có quyền ghi)
+                    val tempDir = File(cacheDir, "dl_temp").apply {
+                        if (exists()) deleteRecursively()
+                        mkdirs()
+                    }
+
                     val request = YoutubeDLRequest(url)
-                    request.addOption("-o", File(downloadDir, "%(title)s.%(ext)s").absolutePath)
+                    request.addOption("-o", File(tempDir, "%(title)s.%(ext)s").absolutePath)
                     request.addOption("-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best")
+                    request.addOption("--merge-output-format", "mp4")
 
                     YoutubeDL.getInstance().execute(request) { progress, _, _ ->
                         runOnUiThread {
@@ -95,9 +101,19 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    withContext(Dispatchers.Main) {
-                        progressBar.progress = 100
-                        tvStatus.text = "Tải xong! Đã lưu vào thư mục Downloads."
+                    // 2. Chuyển video vừa tải sang Thư viện (Gallery)
+                    val downloadedFile = tempDir.listFiles()?.firstOrNull()
+                    if (downloadedFile != null && downloadedFile.exists()) {
+                        saveVideoToGallery(downloadedFile)
+                        downloadedFile.delete()
+                        withContext(Dispatchers.Main) {
+                            progressBar.progress = 100
+                            tvStatus.text = "Tải xong! Đã lưu vào Thư viện (Movies/VideoDownloader)."
+                        }
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            tvStatus.text = "Không tìm thấy file sau khi tải."
+                        }
                     }
                 } catch (e: Exception) {
                     withContext(Dispatchers.Main) {
@@ -107,7 +123,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Nút 3: Cập nhật lõi yt-dlp khi YouTube/TikTok đổi thuật toán
         btnUpdate.setOnClickListener {
             tvStatus.text = "Đang cập nhật lõi yt-dlp..."
             lifecycleScope.launch(Dispatchers.IO) {
@@ -122,6 +137,34 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+        }
+    }
+
+    private fun saveVideoToGallery(videoFile: File) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, videoFile.name)
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/VideoDownloader")
+                put(MediaStore.Video.Media.IS_PENDING, 1)
+            }
+            val resolver = contentResolver
+            val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            if (uri != null) {
+                resolver.openOutputStream(uri)?.use { outStream ->
+                    FileInputStream(videoFile).use { inStream ->
+                        inStream.copyTo(outStream)
+                    }
+                }
+                values.clear()
+                values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            }
+        } else {
+            val moviesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
+            val destFile = File(moviesDir, videoFile.name)
+            videoFile.copyTo(destFile, overwrite = true)
+            MediaScannerConnection.scanFile(this, arrayOf(destFile.absolutePath), arrayOf("video/mp4"), null)
         }
     }
 }
