@@ -1,11 +1,15 @@
 package com.example.videodownloader
 
+import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.webkit.CookieManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ProgressBar
@@ -17,9 +21,12 @@ import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.FileInputStream
+import kotlin.coroutines.resume
 
 class MainActivity : AppCompatActivity() {
 
@@ -67,6 +74,17 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val request = YoutubeDLRequest(url)
                     request.addOption("--user-agent", userAgent)
+
+                    if (url.contains("douyin.com", ignoreCase = true)) {
+                        withContext(Dispatchers.Main) {
+                            tvStatus.text = "Đang tự động lấy Cookie Douyin..."
+                        }
+                        val cookieFile = fetchDouyinCookies(url)
+                        if (cookieFile != null) {
+                            request.addOption("--cookies", cookieFile.absolutePath)
+                        }
+                    }
+
                     val info = YoutubeDL.getInstance().getInfo(request)
                     withContext(Dispatchers.Main) {
                         tvStatus.text = "Tiêu đề: ${info.title}"
@@ -85,7 +103,7 @@ class MainActivity : AppCompatActivity() {
             val url = extractUrl(etUrl.text.toString())
             if (url.isEmpty()) return@setOnClickListener
 
-            tvStatus.text = "Đang bắt đầu tải..."
+            tvStatus.text = "Đang chuẩn bị tải..."
             progressBar.progress = 0
 
             lifecycleScope.launch(Dispatchers.IO) {
@@ -97,6 +115,20 @@ class MainActivity : AppCompatActivity() {
 
                     val request = YoutubeDLRequest(url)
                     request.addOption("--user-agent", userAgent)
+
+                    if (url.contains("douyin.com", ignoreCase = true)) {
+                        withContext(Dispatchers.Main) {
+                            tvStatus.text = "Đang tự động lấy Cookie Douyin..."
+                        }
+                        val cookieFile = fetchDouyinCookies(url)
+                        if (cookieFile != null) {
+                            request.addOption("--cookies", cookieFile.absolutePath)
+                        }
+                        withContext(Dispatchers.Main) {
+                            tvStatus.text = "Đang tải video Douyin..."
+                        }
+                    }
+
                     request.addOption("-o", File(tempDir, "%(title)s.%(ext)s").absolutePath)
                     request.addOption("-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best")
                     request.addOption("--merge-output-format", "mp4")
@@ -146,6 +178,63 @@ class MainActivity : AppCompatActivity() {
                         tvStatus.text = "Lỗi cập nhật: ${e.message}"
                     }
                 }
+            }
+        }
+    }
+
+    // Tự động mở ngầm trang Douyin bằng WebView để lấy Cookie mới lưu ra file chuẩn Netscape
+    @SuppressLint("SetJavaScriptEnabled")
+    private suspend fun fetchDouyinCookies(url: String): File? = withContext(Dispatchers.Main) {
+        withTimeoutOrNull(12000L) {
+            suspendCancellableCoroutine { cont ->
+                val webView = WebView(this@MainActivity)
+                var isFinished = false
+
+                webView.settings.javaScriptEnabled = true
+                webView.settings.domStorageEnabled = true
+                webView.settings.userAgentString = userAgent
+
+                val cookieManager = CookieManager.getInstance()
+                cookieManager.setAcceptCookie(true)
+                cookieManager.setAcceptThirdPartyCookies(webView, true)
+
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, loadedUrl: String?) {
+                        if (isFinished) return
+                        // Chờ 3 giây để JavaScript của Douyin tạo đủ Cookie
+                        view?.postDelayed({
+                            if (isFinished) return@postDelayed
+                            isFinished = true
+
+                            val rawCookies = listOfNotNull(
+                                cookieManager.getCookie("https://www.douyin.com"),
+                                loadedUrl?.let { cookieManager.getCookie(it) }
+                            ).joinToString("; ")
+
+                            val cookieFile = File(cacheDir, "douyin_cookies.txt")
+                            val sb = StringBuilder("# Netscape HTTP Cookie File\n")
+                            val seen = mutableSetOf<String>()
+
+                            rawCookies.split(";").forEach { item ->
+                                val parts = item.trim().split("=", limit = 2)
+                                if (parts.size == 2 && seen.add(parts[0])) {
+                                    sb.append(".douyin.com\tTRUE\t/\tFALSE\t2147483647\t${parts[0]}\t${parts[1]}\n")
+                                }
+                            }
+                            cookieFile.writeText(sb.toString())
+                            webView.destroy()
+
+                            if (cont.isActive) cont.resume(cookieFile)
+                        }, 3000L)
+                    }
+                }
+
+                cont.invokeOnCancellation {
+                    isFinished = true
+                    webView.destroy()
+                }
+
+                webView.loadUrl(url)
             }
         }
     }
