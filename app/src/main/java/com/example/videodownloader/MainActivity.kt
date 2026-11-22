@@ -323,4 +323,94 @@ class MainActivity : AppCompatActivity() {
     // Gọi API tikwm.com lấy link MP4 không logo cho TikTok quốc tế
     private fun fetchTikWmApi(videoUrl: String): Pair<String, String> {
         val encodedUrl = URLEncoder.encode(videoUrl, "UTF-8")
-        val apiUrl = "
+        val apiUrl = "https://www.tikwm.com/api/?url=$encodedUrl&hd=1"
+        val conn = URL(apiUrl).openConnection() as HttpURLConnection
+        conn.requestMethod = "GET"
+        conn.setRequestProperty("User-Agent", desktopUserAgent)
+        conn.connectTimeout = 15000
+        conn.readTimeout = 15000
+
+        val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+        val json = JSONObject(responseText)
+        if (json.optInt("code", -1) != 0) {
+            throw Exception(json.optString("msg", "Không thể lấy video từ API"))
+        }
+
+        val data = json.getJSONObject("data")
+        val title = data.optString("title", "Video")
+        val playUrl = data.optString("hdplay").ifEmpty { data.optString("play") }
+        if (playUrl.isEmpty()) {
+            throw Exception("Không tìm thấy link video (có thể đây là bài đăng ảnh)")
+        }
+        return Pair(title, playUrl)
+    }
+
+    // Tải trực tiếp file MP4 về máy
+    private fun downloadDirectFile(
+        fileUrl: String,
+        destFile: File,
+        cookies: String? = null,
+        referer: String? = null,
+        customUa: String = desktopUserAgent,
+        onProgress: (Int) -> Unit
+    ) {
+        val conn = URL(fileUrl).openConnection() as HttpURLConnection
+        conn.setRequestProperty("User-Agent", customUa)
+        if (!cookies.isNullOrEmpty()) conn.setRequestProperty("Cookie", cookies)
+        if (!referer.isNullOrEmpty()) conn.setRequestProperty("Referer", referer)
+        conn.connectTimeout = 15000
+        conn.readTimeout = 30000
+        conn.connect()
+
+        val totalBytes = conn.contentLengthLong
+        conn.inputStream.use { input ->
+            FileOutputStream(destFile).use { output ->
+                val buffer = ByteArray(8192)
+                var downloadedBytes = 0L
+                var bytesRead: Int
+                while (input.read(buffer).also { bytesRead = it } != -1) {
+                    output.write(buffer, 0, bytesRead)
+                    downloadedBytes += bytesRead
+                    if (totalBytes > 0) {
+                        val progress = ((downloadedBytes * 100) / totalBytes).toInt()
+                        onProgress(progress)
+                    }
+                }
+            }
+        }
+    }
+
+    // Tự động tách lấy link https://... khi dán văn bản có chữ thừa
+    private fun extractUrl(input: String): String {
+        val regex = Regex("https?://[^\\s]+")
+        return regex.find(input)?.value ?: input.trim()
+    }
+
+    private fun saveVideoToGallery(videoFile: File) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, videoFile.name)
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/VideoDownloader")
+                put(MediaStore.Video.Media.IS_PENDING, 1)
+            }
+            val resolver = contentResolver
+            val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            if (uri != null) {
+                resolver.openOutputStream(uri)?.use { outStream ->
+                    FileInputStream(videoFile).use { inStream ->
+                        inStream.copyTo(outStream)
+                    }
+                }
+                values.clear()
+                values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            }
+        } else {
+            val moviesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
+            val destFile = File(moviesDir, videoFile.name)
+            videoFile.copyTo(destFile, overwrite = true)
+            MediaScannerConnection.scanFile(this, arrayOf(destFile.absolutePath), arrayOf("video/mp4"), null)
+        }
+    }
+}
