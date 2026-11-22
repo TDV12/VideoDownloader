@@ -1,22 +1,13 @@
 package com.example.videodownloader
 
-import android.annotation.SuppressLint
-import android.app.AlertDialog
 import android.content.ContentValues
 import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
-import android.view.ViewGroup
-import android.webkit.CookieManager
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.EditText
-import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -42,8 +33,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvDirectLink: TextView
     private lateinit var progressBar: ProgressBar
 
-    private val desktopUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-    private val mobileUserAgent = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+    private val desktopUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    private val iphoneUa = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,7 +49,6 @@ class MainActivity : AppCompatActivity() {
         val btnDownload = findViewById<Button>(R.id.btnDownload)
         val btnUpdate = findViewById<Button>(R.id.btnUpdate)
 
-        // Khởi tạo yt-dlp và FFmpeg ngầm cho YouTube/Facebook
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 YoutubeDL.getInstance().init(this@MainActivity)
@@ -70,7 +60,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Nút 1: Lấy tiêu đề và link tải trực tiếp
+        // Nút 1: Lấy link gốc
         btnGetInfo.setOnClickListener {
             val url = extractUrl(etUrl.text.toString())
             if (url.isEmpty()) return@setOnClickListener
@@ -78,30 +68,21 @@ class MainActivity : AppCompatActivity() {
             tvStatus.text = "Đang phân tích link..."
             tvDirectLink.text = ""
 
-            if (isDouyin(url)) {
-                showDouyinWebViewDialog(url) { videoStreamUrl, _ ->
-                    tvStatus.text = "Đã bắt được luồng video Douyin!"
-                    tvDirectLink.text = "Link gốc:\n$videoStreamUrl"
-                }
-                return@setOnClickListener
-            }
-
             lifecycleScope.launch(Dispatchers.IO) {
                 try {
-                    if (isTikTok(url)) {
-                        val (title, playUrl) = fetchTikWmApi(url)
-                        withContext(Dispatchers.Main) {
-                            tvStatus.text = "Tiêu đề: $title"
-                            tvDirectLink.text = "Link gốc (Không logo):\n$playUrl"
+                    val (title, playUrl) = when {
+                        isDouyin(url) -> fetchDouyinDirect(url)
+                        isTikTok(url) -> fetchTikWmApi(url)
+                        else -> {
+                            val req = YoutubeDLRequest(url)
+                            req.addOption("--user-agent", desktopUa)
+                            val info = YoutubeDL.getInstance().getInfo(req)
+                            Pair(info.title ?: "Video", info.url ?: "")
                         }
-                    } else {
-                        val request = YoutubeDLRequest(url)
-                        request.addOption("--user-agent", desktopUserAgent)
-                        val info = YoutubeDL.getInstance().getInfo(request)
-                        withContext(Dispatchers.Main) {
-                            tvStatus.text = "Tiêu đề: ${info.title}"
-                            tvDirectLink.text = "Link gốc:\n${info.url}"
-                        }
+                    }
+                    withContext(Dispatchers.Main) {
+                        tvStatus.text = "Tiêu đề: $title"
+                        tvDirectLink.text = "Link gốc:\n$playUrl"
                     }
                 } catch (e: Exception) {
                     withContext(Dispatchers.Main) {
@@ -119,16 +100,6 @@ class MainActivity : AppCompatActivity() {
             tvStatus.text = "Đang bắt đầu tải..."
             progressBar.progress = 0
 
-            // Luồng 1: Douyin -> Bật WebView bắt luồng video trực tiếp
-            if (isDouyin(url)) {
-                tvStatus.text = "Đang mở Douyin để bắt link video..."
-                showDouyinWebViewDialog(url) { videoStreamUrl, cookies ->
-                    downloadDouyinStream(videoStreamUrl, cookies)
-                }
-                return@setOnClickListener
-            }
-
-            // Luồng 2 & 3: TikTok (API tikwm) & YouTube/Facebook (yt-dlp)
             lifecycleScope.launch(Dispatchers.IO) {
                 try {
                     val tempDir = File(cacheDir, "dl_temp").apply {
@@ -136,41 +107,50 @@ class MainActivity : AppCompatActivity() {
                         mkdirs()
                     }
 
-                    val downloadedFile: File? = if (isTikTok(url)) {
-                        withContext(Dispatchers.Main) {
-                            tvStatus.text = "Đang bóc tách video TikTok không logo..."
-                        }
-                        val (title, playUrl) = fetchTikWmApi(url)
-                        val safeName = title.replace(Regex("[^a-zA-Z0-9\\u00C0-\\u1EF9\\s_-]"), "")
-                            .trim()
-                            .take(50)
-                            .ifEmpty { "tiktok_${System.currentTimeMillis()}" }
-                        val destFile = File(tempDir, "$safeName.mp4")
-
-                        downloadDirectFile(playUrl, destFile) { progress ->
-                            runOnUiThread {
-                                progressBar.progress = progress
-                                tvStatus.text = "Đang tải: $progress%"
+                    val downloadedFile: File? = when {
+                        isDouyin(url) -> {
+                            withContext(Dispatchers.Main) { tvStatus.text = "Đang bóc tách Douyin không logo..." }
+                            val (title, playUrl) = fetchDouyinDirect(url)
+                            val destFile = File(tempDir, "$title.mp4")
+                            downloadDirectFile(playUrl, destFile, iphoneUa) { p ->
+                                runOnUiThread {
+                                    progressBar.progress = p
+                                    tvStatus.text = "Đang tải Douyin: $p%"
+                                }
                             }
+                            destFile
                         }
-                        destFile
-                    } else {
-                        val request = YoutubeDLRequest(url)
-                        request.addOption("--user-agent", desktopUserAgent)
-                        request.addOption("-o", File(tempDir, "%(title)s.%(ext)s").absolutePath)
-                        request.addOption("-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best")
-                        request.addOption("--merge-output-format", "mp4")
-
-                        YoutubeDL.getInstance().execute(request) { progress, _, _ ->
-                            runOnUiThread {
-                                progressBar.progress = progress.toInt()
-                                tvStatus.text = "Đang tải: ${progress.toInt()}%"
+                        isTikTok(url) -> {
+                            withContext(Dispatchers.Main) { tvStatus.text = "Đang bóc tách TikTok không logo..." }
+                            val (title, playUrl) = fetchTikWmApi(url)
+                            val safeName = title.replace(Regex("[^a-zA-Z0-9\\u00C0-\\u1EF9\\s_-]"), "")
+                                .trim().take(50).ifEmpty { "tiktok_${System.currentTimeMillis()}" }
+                            val destFile = File(tempDir, "$safeName.mp4")
+                            downloadDirectFile(playUrl, destFile, desktopUa) { p ->
+                                runOnUiThread {
+                                    progressBar.progress = p
+                                    tvStatus.text = "Đang tải TikTok: $p%"
+                                }
                             }
+                            destFile
                         }
-                        tempDir.listFiles()?.firstOrNull()
+                        else -> {
+                            val req = YoutubeDLRequest(url)
+                            req.addOption("--user-agent", desktopUa)
+                            req.addOption("-o", File(tempDir, "%(title)s.%(ext)s").absolutePath)
+                            req.addOption("-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best")
+                            req.addOption("--merge-output-format", "mp4")
+                            YoutubeDL.getInstance().execute(req) { progress, _, _ ->
+                                runOnUiThread {
+                                    progressBar.progress = progress.toInt()
+                                    tvStatus.text = "Đang tải: ${progress.toInt()}%"
+                                }
+                            }
+                            tempDir.listFiles()?.firstOrNull()
+                        }
                     }
 
-                    if (downloadedFile != null && downloadedFile.exists()) {
+                    if (downloadedFile != null && downloadedFile.exists() && downloadedFile.length() > 0) {
                         saveVideoToGallery(downloadedFile)
                         downloadedFile.delete()
                         withContext(Dispatchers.Main) {
@@ -190,7 +170,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Nút 3: Cập nhật lõi yt-dlp bản Nightly mới nhất hàng ngày
+        // Nút 3: Cập nhật lõi yt-dlp
         btnUpdate.setOnClickListener {
             tvStatus.text = "Đang cập nhật lõi yt-dlp (Nightly)..."
             lifecycleScope.launch(Dispatchers.IO) {
@@ -211,157 +191,82 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Bật cửa sổ WebView cho Douyin để tự bắt luồng video đang phát
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun showDouyinWebViewDialog(url: String, onVideoFound: (String, String?) -> Unit) {
-        val webView = WebView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                1000
-            )
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            settings.mediaPlaybackRequiresUserGesture = false
-            settings.userAgentString = mobileUserAgent
+    private fun isTikTok(url: String) = url.lowercase().contains("tiktok.com")
+    private fun isDouyin(url: String) = url.lowercase().contains("douyin.com")
+
+    // Bóc tách trực tiếp video Douyin không logo bằng trang di động iesdouyin
+    private fun fetchDouyinDirect(shortUrl: String): Pair<String, String> {
+        val conn1 = openWithRedirects(shortUrl, iphoneUa)
+        val finalUrl = conn1.url.toString()
+        conn1.disconnect()
+
+        val videoId = Regex("(\\d{15,25})").find(finalUrl)?.value
+            ?: throw Exception("Không tìm thấy ID video Douyin")
+
+        val shareUrl = "https://www.iesdouyin.com/share/video/$videoId/"
+        val conn2 = openWithRedirects(shareUrl, iphoneUa)
+        val html = conn2.inputStream.bufferedReader().use { it.readText() }
+        conn2.disconnect()
+
+        // Tìm mã uri video trong dữ liệu JSON nhúng trong trang
+        val uriMatch = Regex("\"play_addr\"\\s*:\\s*\\{[^}]*?\"uri\"\\s*:\\s*\"([^\"]+)\"").find(html)
+        if (uriMatch != null) {
+            val uri = uriMatch.groupValues[1]
+            val directUrl = "https://aweme.snssdk.com/aweme/v1/play/?video_id=$uri&ratio=1080p&line=0"
+            return Pair("douyin_$videoId", directUrl)
         }
 
-        val cookieManager = CookieManager.getInstance()
-        cookieManager.setAcceptCookie(true)
-        cookieManager.setAcceptThirdPartyCookies(webView, true)
-
-        var found = false
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("Đang mở Douyin (Kéo Captcha nếu có)")
-            .setView(webView)
-            .setNegativeButton("Hủy") { d, _ ->
-                found = true
-                webView.destroy()
-                d.dismiss()
-                tvStatus.text = "Đã hủy tải Douyin."
-            }
-            .setCancelable(false)
-            .create()
-
-        webView.webViewClient = object : WebViewClient() {
-            override fun shouldInterceptRequest(
-                view: WebView?,
-                request: WebResourceRequest?
-            ): WebResourceResponse? {
-                val reqUrl = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
-                if (!found && isDouyinVideoStream(reqUrl)) {
-                    found = true
-                    val cookies = cookieManager.getCookie(reqUrl) ?: cookieManager.getCookie("https://www.douyin.com")
-                    runOnUiThread {
-                        webView.destroy()
-                        dialog.dismiss()
-                        onVideoFound(reqUrl, cookies)
-                    }
-                }
-                return super.shouldInterceptRequest(view, request)
-            }
+        // Dự phòng: tìm link playwm và đổi thành play (xóa logo)
+        val playWmMatch = Regex("https?://[^\"\\\\]*?/aweme/v1/playwm/[^\"\\\\]+").find(html)
+        if (playWmMatch != null) {
+            val directUrl = playWmMatch.value.replace("\\u002F", "/").replace("playwm", "play")
+            return Pair("douyin_$videoId", directUrl)
         }
 
-        dialog.show()
-        webView.loadUrl(url)
+        throw Exception("Không bóc tách được luồng video Douyin (có thể là bài đăng ảnh)")
     }
 
-    private fun downloadDouyinStream(videoStreamUrl: String, cookies: String?) {
-        tvStatus.text = "Đã bắt được video! Đang tải về máy..."
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                val tempDir = File(cacheDir, "dl_temp").apply {
-                    if (exists()) deleteRecursively()
-                    mkdirs()
-                }
-                val destFile = File(tempDir, "douyin_${System.currentTimeMillis()}.mp4")
-                downloadDirectFile(
-                    fileUrl = videoStreamUrl,
-                    destFile = destFile,
-                    cookies = cookies,
-                    referer = "https://www.douyin.com/",
-                    customUa = mobileUserAgent
-                ) { progress ->
-                    runOnUiThread {
-                        progressBar.progress = progress
-                        tvStatus.text = "Đang tải Douyin: $progress%"
-                    }
-                }
-
-                if (destFile.exists() && destFile.length() > 0) {
-                    saveVideoToGallery(destFile)
-                    destFile.delete()
-                    withContext(Dispatchers.Main) {
-                        progressBar.progress = 100
-                        tvStatus.text = "Tải xong Douyin! Đã lưu vào Thư viện (Movies/VideoDownloader)."
-                    }
-                } else {
-                    withContext(Dispatchers.Main) {
-                        tvStatus.text = "File tải về bị rỗng."
-                    }
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    tvStatus.text = "Lỗi tải Douyin: ${e.message}"
-                }
-            }
-        }
-    }
-
-    private fun isDouyinVideoStream(url: String): Boolean {
-        val lower = url.lowercase()
-        if (lower.endsWith(".js") || lower.endsWith(".css") || lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".webp")) {
-            return false
-        }
-        return lower.contains("douyinvod.com") ||
-                lower.contains("aweme/v1/play") ||
-                lower.contains("mime_type=video_mp4")
-    }
-
-    private fun isTikTok(url: String): Boolean = url.lowercase().contains("tiktok.com")
-    private fun isDouyin(url: String): Boolean = url.lowercase().contains("douyin.com")
-
-    // Gọi API tikwm.com lấy link MP4 không logo cho TikTok quốc tế
+    // Gọi API tikwm.com cho TikTok quốc tế
     private fun fetchTikWmApi(videoUrl: String): Pair<String, String> {
         val encodedUrl = URLEncoder.encode(videoUrl, "UTF-8")
-        val apiUrl = "https://www.tikwm.com/api/?url=$encodedUrl&hd=1"
-        val conn = URL(apiUrl).openConnection() as HttpURLConnection
-        conn.requestMethod = "GET"
-        conn.setRequestProperty("User-Agent", desktopUserAgent)
-        conn.connectTimeout = 15000
-        conn.readTimeout = 15000
-
+        val conn = openWithRedirects("https://www.tikwm.com/api/?url=$encodedUrl&hd=1", desktopUa)
         val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+        conn.disconnect()
+
         val json = JSONObject(responseText)
         if (json.optInt("code", -1) != 0) {
             throw Exception(json.optString("msg", "Không thể lấy video từ API"))
         }
-
         val data = json.getJSONObject("data")
         val title = data.optString("title", "Video")
         val playUrl = data.optString("hdplay").ifEmpty { data.optString("play") }
-        if (playUrl.isEmpty()) {
-            throw Exception("Không tìm thấy link video (có thể đây là bài đăng ảnh)")
-        }
+        if (playUrl.isEmpty()) throw Exception("Không tìm thấy link video")
         return Pair(title, playUrl)
     }
 
-    // Tải trực tiếp file MP4 về máy
-    private fun downloadDirectFile(
-        fileUrl: String,
-        destFile: File,
-        cookies: String? = null,
-        referer: String? = null,
-        customUa: String = desktopUserAgent,
-        onProgress: (Int) -> Unit
-    ) {
-        val conn = URL(fileUrl).openConnection() as HttpURLConnection
-        conn.setRequestProperty("User-Agent", customUa)
-        if (!cookies.isNullOrEmpty()) conn.setRequestProperty("Cookie", cookies)
-        if (!referer.isNullOrEmpty()) conn.setRequestProperty("Referer", referer)
-        conn.connectTimeout = 15000
-        conn.readTimeout = 30000
-        conn.connect()
+    // Mở kết nối hỗ trợ tự động chuyển hướng giữa HTTP và HTTPS
+    private fun openWithRedirects(startUrl: String, ua: String): HttpURLConnection {
+        var currentUrl = startUrl
+        repeat(6) {
+            val conn = URL(currentUrl).openConnection() as HttpURLConnection
+            conn.instanceFollowRedirects = false
+            conn.setRequestProperty("User-Agent", ua)
+            conn.connectTimeout = 15000
+            conn.readTimeout = 20000
+            val code = conn.responseCode
+            if (code in 301..308) {
+                val location = conn.getHeaderField("Location") ?: return conn
+                conn.disconnect()
+                currentUrl = URL(URL(currentUrl), location).toString()
+            } else {
+                return conn
+            }
+        }
+        throw Exception("Quá nhiều lượt chuyển hướng")
+    }
 
+    private fun downloadDirectFile(fileUrl: String, destFile: File, ua: String, onProgress: (Int) -> Unit) {
+        val conn = openWithRedirects(fileUrl, ua)
         val totalBytes = conn.contentLengthLong
         conn.inputStream.use { input ->
             FileOutputStream(destFile).use { output ->
@@ -372,15 +277,14 @@ class MainActivity : AppCompatActivity() {
                     output.write(buffer, 0, bytesRead)
                     downloadedBytes += bytesRead
                     if (totalBytes > 0) {
-                        val progress = ((downloadedBytes * 100) / totalBytes).toInt()
-                        onProgress(progress)
+                        onProgress(((downloadedBytes * 100) / totalBytes).toInt())
                     }
                 }
             }
         }
+        conn.disconnect()
     }
 
-    // Tự động tách lấy link https://... khi dán văn bản có chữ thừa
     private fun extractUrl(input: String): String {
         val regex = Regex("https?://[^\\s]+")
         return regex.find(input)?.value ?: input.trim()
