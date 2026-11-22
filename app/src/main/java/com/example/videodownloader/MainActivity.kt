@@ -76,7 +76,7 @@ class MainActivity : AppCompatActivity() {
             if (url.isEmpty()) return@setOnClickListener
 
             if (isDouyin(url)) {
-                openDouyinWebDownloader(url)
+                showDouyinSitePicker(url)
                 return@setOnClickListener
             }
 
@@ -110,9 +110,9 @@ class MainActivity : AppCompatActivity() {
             val url = extractUrl(etUrl.text.toString())
             if (url.isEmpty()) return@setOnClickListener
 
-            // Luồng 1: Douyin -> Mở trình duyệt tải Douyin ngay trong app
+            // Luồng 1: Douyin -> Hiện bảng chọn trang web tải
             if (isDouyin(url)) {
-                openDouyinWebDownloader(url)
+                showDouyinSitePicker(url)
                 return@setOnClickListener
             }
 
@@ -196,13 +196,39 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Tự động chép link Douyin vào Clipboard và mở SnapDouyin trong App để bắt file tải về Thư viện
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun openDouyinWebDownloader(cleanUrl: String) {
+    // Hiện danh sách các trang web tải Douyin để người dùng chọn
+    private fun showDouyinSitePicker(cleanUrl: String) {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Douyin URL", cleanUrl))
-        Toast.makeText(this, "Đã copy sẵn link Douyin! Chỉ cần bấm Dán và Tải.", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, "Đã copy sẵn link Douyin!", Toast.LENGTH_SHORT).show()
 
+        val siteNames = arrayOf(
+            "SnapDouyin (snapdouyin.app)",
+            "DLPanda (dlpanda.com)",
+            "LoveTik (lovetik.com)",
+            "SaveTT (savett.cc)",
+            "Tainhanh (tainhanhvideo.com)"
+        )
+        val siteUrls = arrayOf(
+            "https://snapdouyin.app/vi",
+            "https://dlpanda.com/vi",
+            "https://lovetik.com/vi",
+            "https://savett.cc/en/",
+            "https://tainhanhvideo.com"
+        )
+
+        AlertDialog.Builder(this)
+            .setTitle("Chọn trang tải Douyin")
+            .setItems(siteNames) { _, which ->
+                openDouyinWebView(siteNames[which], siteUrls[which])
+            }
+            .setNegativeButton("Hủy", null)
+            .show()
+    }
+
+    // Mở trang web đã chọn ngay trong App và tự bắt file tải về Thư viện
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun openDouyinWebView(siteTitle: String, siteUrl: String) {
         val webView = WebView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -217,7 +243,7 @@ class MainActivity : AppCompatActivity() {
         cookieManager.setAcceptThirdPartyCookies(webView, true)
 
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Tải Douyin (Bấm Dán -> Tải)")
+            .setTitle("$siteTitle (Bấm Dán -> Tải)")
             .setView(webView)
             .setNegativeButton("Đóng") { d, _ ->
                 webView.destroy()
@@ -227,7 +253,6 @@ class MainActivity : AppCompatActivity() {
 
         webView.webViewClient = WebViewClient()
 
-        // Khi người dùng bấm nút Tải trên web, app tự bắt link file MP4 để tải về Thư viện
         webView.setDownloadListener { downloadUrl, userAgent, _, _, _ ->
             val cookies = cookieManager.getCookie(downloadUrl)
             webView.destroy()
@@ -236,7 +261,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         dialog.show()
-        webView.loadUrl("https://snapdouyin.app/vi")
+        webView.loadUrl(siteUrl)
     }
 
     private fun startDirectGalleryDownload(fileUrl: String, ua: String, cookies: String?, fileName: String) {
@@ -279,7 +304,6 @@ class MainActivity : AppCompatActivity() {
     private fun isTikTok(url: String) = url.lowercase().contains("tiktok.com")
     private fun isDouyin(url: String) = url.lowercase().contains("douyin.com")
 
-    // Gọi API tikwm.com cho TikTok quốc tế
     private fun fetchTikWmApi(videoUrl: String): Pair<String, String> {
         val encodedUrl = URLEncoder.encode(videoUrl, "UTF-8")
         val conn = openWithRedirects("https://www.tikwm.com/api/?url=$encodedUrl&hd=1", desktopUa)
